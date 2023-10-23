@@ -142,7 +142,7 @@ namespace fiskaltrust.Middleware.SCU.DE.FiskalyCertified.Services
                 {"end_transaction_number", toTransactionNumber.ToString() }
             };
             var jsonPayload = JsonConvert.SerializeObject(metadata, new JsonSerializerSettings { DefaultValueHandling = DefaultValueHandling.Ignore });
-            var response = await _httpClient.SendAsync(new HttpMethod("PATCH"), $"tss/{tssId}/export/{exportId}/metadata",jsonPayload);
+            var response = await _httpClient.SendAsync(new HttpMethod("PATCH"), $"tss/{tssId}/export/{exportId}/metadata", jsonPayload);
             if (!response.IsSuccessStatusCode)
             {
                 var responseContent = await response.Content.ReadAsStringAsync();

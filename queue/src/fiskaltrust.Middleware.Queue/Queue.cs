@@ -16,13 +16,13 @@ namespace fiskaltrust.Middleware.Queue
         private readonly IJournalProcessor _journalProcessor;
         private readonly MiddlewareConfiguration _middlewareConfiguration;
 
-        public Queue(ISignProcessor signProcessor, IJournalProcessor journalProcessor, SignProcessorV2 signProcessorV2, MiddlewareConfiguration middlewareConfiguration)
+        public Queue(ISignProcessor signProcessor, IJournalProcessor journalProcessor, MessageHandler messageHandler, MiddlewareConfiguration middlewareConfiguration)
         {
             _signProcessor = signProcessor;
             _journalProcessor = journalProcessor;
             _middlewareConfiguration = middlewareConfiguration;
 
-            _ = signProcessorV2.RegisterMQTTBusAsync();
+            _ = messageHandler.RegisterMQTTBusAsync();
         }
 
         public string Echo(string message) => message;

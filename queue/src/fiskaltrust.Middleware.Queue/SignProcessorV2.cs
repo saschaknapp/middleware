@@ -1,25 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using fiskaltrust.ifPOS.v1;
-using fiskaltrust.Middleware.Contracts.Extensions;
 using fiskaltrust.Middleware.Contracts.Interfaces;
 using fiskaltrust.Middleware.Contracts.Models;
 using fiskaltrust.Middleware.Contracts.Repositories;
 using fiskaltrust.Middleware.Queue.Extensions;
-using fiskaltrust.Middleware.Queue.Models;
-using fiskaltrust.storage.serialization.V0;
 using fiskaltrust.storage.V0;
 using Microsoft.Extensions.Logging;
-using MQTTnet;
-using MQTTnet.Client;
-using MQTTnet.Extensions.ManagedClient;
-using MQTTnet.Protocol;
 using Newtonsoft.Json;
-using Org.BouncyCastle.Asn1.Ocsp;
 
 namespace fiskaltrust.Middleware.Queue
 {
@@ -41,10 +31,6 @@ namespace fiskaltrust.Middleware.Queue
         private readonly Guid _cashBoxId = Guid.Empty;
         private readonly bool _isSandbox;
         private readonly SignatureFactory _signatureFactory;
-        private IManagedMqttClient _mqttClient;
-
-        public Dictionary<string, SignRequestState> Results { get; set; } = new Dictionary<string, SignRequestState>();
-        //private readonly Action<string> _onMessage;
 
         public SignProcessorV2(
             ILogger<SignProcessorV2> logger,
@@ -69,73 +55,7 @@ namespace fiskaltrust.Middleware.Queue
             _signatureFactory = new SignatureFactory();
         }
 
-        public async Task RegisterMQTTBusAsync()
-        {
-            var mqttFactory = new MqttFactory();
-            var clientId = _queueId;
-            _mqttClient = mqttFactory.CreateManagedMqttClient();
-            var mqttClientOptions = new MqttClientOptionsBuilder()
-                    .WithClientId(clientId.ToString())
-                    .WithCleanSession(false)
-                    .WithoutThrowOnNonSuccessfulConnectResponse()
-                    .WithProtocolVersion(MQTTnet.Formatter.MqttProtocolVersion.V500)
-                    .WithWebSocketServer(o => o.WithUri("gateway-sandbox.fiskaltrust.eu:80/mqtt"))
-                    .Build();
-
-            var managedMqttClientOptions = new ManagedMqttClientOptionsBuilder()
-                .WithClientOptions(mqttClientOptions)
-                .Build();
-
-            await _mqttClient.StartAsync(managedMqttClientOptions);
-
-            _mqttClient.ApplicationMessageReceivedAsync += async e =>
-            {
-                try
-                {
-                    _logger.LogInformation("Received new message for topic {topic} with responsetopic {responsetopic}", e.ApplicationMessage.Topic, e.ApplicationMessage.ResponseTopic);
-                    if (e.ApplicationMessage.Topic == $"{_cashBoxId}/signrequest/state")
-                    {
-                        _logger.LogInformation("Trying to enqueue {topic}", e.ApplicationMessage.ResponseTopic);
-                        var ss = new MqttApplicationMessageBuilder()
-                            .WithTopic(e.ApplicationMessage.ResponseTopic)
-                            .WithPayload(JsonConvert.SerializeObject(Results.Values.ToList()))
-                            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-                            .Build();
-                        await _mqttClient.EnqueueAsync(ss);
-                        await e.AcknowledgeAsync(CancellationToken.None);
-                        _logger.LogInformation("Published new message to {topic}", e.ApplicationMessage.ResponseTopic);
-                    }
-                    else
-                    {
-                        _logger.LogInformation("Trying tasso enqueue {topic}", e.ApplicationMessage.ResponseTopic);
-                        var signRequestMessage = JsonConvert.DeserializeObject<SignRequest>(e.ApplicationMessage.ConvertPayloadToString());
-                        if (Results.ContainsKey(signRequestMessage.operationId))
-                        {
-                            _logger.LogInformation("This should not be possible");
-                        }
-                        else
-                        {
-                            var result = await QueueQueueItemAsync(signRequestMessage.request, signRequestMessage.operationId);
-                            Results.Add(signRequestMessage.operationId, new SignRequestState(signRequestMessage.operationId, _queueId, result.ftQueueItemId, "Pending", null, null));
-
-                            await e.AcknowledgeAsync(CancellationToken.None);
-                            await _mqttClient.EnqueueAsync(e.ApplicationMessage.ResponseTopic, JsonConvert.SerializeObject(new SignRequestAccepted(result.OperationId, result.ftQueueId, result.ftQueueItemId)), MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce);
-                            _logger.LogInformation("Published new message to {topic}", e.ApplicationMessage.ResponseTopic);
-                            await ProcessQueueItemAsync(result);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to process message for topic  {topic}", e.ApplicationMessage.Topic);
-                    throw;
-                }
-            };
-            await _mqttClient.SubscribeAsync($"{_cashBoxId}/signrequest");
-            await _mqttClient.SubscribeAsync($"{_cashBoxId}/signrequest/state");
-        }
-
-        private async Task<OperationalQueueItem> QueueQueueItemAsync(ReceiptRequest data, string operationId)
+        public async Task<OperationalQueueItem> QueueQueueItemAsync(ReceiptRequest data, string operationId)
         {
             _logger.LogInformation("SignProcessor.ProcessAsync called.");
             try
@@ -185,13 +105,12 @@ namespace fiskaltrust.Middleware.Queue
             }
         }
 
-        private async Task ProcessQueueItemAsync(OperationalQueueItem queueItem)
+        public async Task<ReceiptResponse> ProcessQueueItemAsync(OperationalQueueItem queueItem)
         {
             var queue = await _configurationRepository.GetQueueAsync(_queueId).ConfigureAwait(false);
             var data = JsonConvert.DeserializeObject<ReceiptRequest>(queueItem.request);
             try
             {
-                Results[queueItem.OperationId] = new SignRequestState(queueItem.OperationId, queueItem.ftQueueId, queueItem.ftQueueItemId, "Processing", null, null);
                 queueItem.ftWorkMoment = DateTime.UtcNow;
                 _logger.LogTrace("SignProcessor.InternalSign: Calling country specific SignProcessor.");
                 (var receiptResponse, var countrySpecificActionJournals) = await _countrySpecificSignProcessor.ProcessAsync(data, queue, queueItem).ConfigureAwait(false);
@@ -224,8 +143,7 @@ namespace fiskaltrust.Middleware.Queue
                     _logger.LogTrace("SignProcessor.InternalSign: Adding ReceiptJournal to database.");
                     _ = await CreateReceiptJournalAsync(queue, queueItem, data).ConfigureAwait(false);
                 }
-                Results[queueItem.OperationId] = new SignRequestState(queueItem.OperationId, queueItem.ftQueueId, queueItem.ftQueueItemId, "Done", null, JsonConvert.SerializeObject(receiptResponse));
-                await _mqttClient.EnqueueAsync($"{_cashBoxId}/signrequest/{queueItem.OperationId}/done", JsonConvert.SerializeObject(new SignRequestDoneMessage(receiptResponse)), MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce);
+                return receiptResponse;
             }
             finally
             {
@@ -269,12 +187,4 @@ namespace fiskaltrust.Middleware.Queue
             await _configurationRepository.InsertOrUpdateQueueAsync(queue).ConfigureAwait(false);
         }
     }
-
-    public record SignRequest(string operationId, int lifetime, ReceiptRequest request);
-
-    public record SignRequestAccepted(string operationId, Guid queueId, Guid queueItemId);
-
-    public record SignRequestDoneMessage(ReceiptResponse response);
-
-    public record SignRequestState(string operationId, Guid queueId, Guid? queueItemId, string state, string stateMessage, string stateData);
 }

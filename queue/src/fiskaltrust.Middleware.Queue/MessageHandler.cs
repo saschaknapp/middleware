@@ -113,7 +113,7 @@ namespace fiskaltrust.Middleware.Queue
                     if (!Results.ContainsKey(signRequestMessage.operationId))
                     {
                         queueItem = await _signProcessorV2.QueueQueueItemAsync(signRequestMessage.request, signRequestMessage.operationId);
-                        Results.Add(signRequestMessage.operationId, new SignRequestStateMessage(signRequestMessage.operationId, _queueId, result.ftQueueItemId, "Pending", null, null));       
+                        Results.Add(signRequestMessage.operationId, new SignRequestStateMessage(signRequestMessage.operationId, _queueId, queueItem.ftQueueItemId, "Pending", null, null));       
                     }
                     else
                     {

@@ -17,8 +17,9 @@ using Newtonsoft.Json;
 
 namespace fiskaltrust.Middleware.Queue
 {
-
     public record SignRequestMessage(string operationId, int lifetime, ReceiptRequest request);
+
+    public record SignResponseMessage(string operationId, int lifetime);
 
     public record SignRequestAcceptedMessage(string operationId, Guid queueId, Guid queueItemId);
 
@@ -40,7 +41,7 @@ namespace fiskaltrust.Middleware.Queue
 
         public Dictionary<string, SignRequestStateMessage> Results { get; set; } = new Dictionary<string, SignRequestStateMessage>();
 
-        public MessageHandler(ILogger<MessageHandler> logger, Guid queueId, MiddlewareConfiguration configuration, SignProcessorV2 signProcessorV2, IMiddlewareQueueItemRepository queueItemRepository) 
+        public MessageHandler(ILogger<MessageHandler> logger, Guid queueId, MiddlewareConfiguration configuration, SignProcessorV2 signProcessorV2, IMiddlewareQueueItemRepository queueItemRepository)
         {
             _logger = logger;
             _queueId = queueId;
@@ -106,6 +107,21 @@ namespace fiskaltrust.Middleware.Queue
                     await e.AcknowledgeAsync(CancellationToken.None);
                     _logger.LogDebug("Published new message to {topic}", e.ApplicationMessage.ResponseTopic);
                 }
+                else if (e.ApplicationMessage.Topic.StartsWith($"{_cashBoxId}/signresponse"))
+                {
+                    var message = JsonConvert.DeserializeObject<SignResponseMessage>(e.ApplicationMessage.ConvertPayloadToString());
+                    if (Results.ContainsKey(message.operationId))
+                    {
+                        var ss = new MqttApplicationMessageBuilder()
+                          .WithTopic(e.ApplicationMessage.ResponseTopic)
+                          .WithPayload(Results[message.operationId].stateData)
+                          .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                          .Build();
+                        await _mqttClient.EnqueueAsync(ss);
+                        _logger.LogDebug("Published new message to {topic}", e.ApplicationMessage.ResponseTopic);
+                    }
+                    await e.AcknowledgeAsync(CancellationToken.None);
+                }
                 else
                 {
                     var signRequestMessage = JsonConvert.DeserializeObject<SignRequestMessage>(e.ApplicationMessage.ConvertPayloadToString());
@@ -113,7 +129,7 @@ namespace fiskaltrust.Middleware.Queue
                     if (!Results.ContainsKey(signRequestMessage.operationId))
                     {
                         queueItem = await _signProcessorV2.QueueQueueItemAsync(signRequestMessage.request, signRequestMessage.operationId);
-                        Results.Add(signRequestMessage.operationId, new SignRequestStateMessage(signRequestMessage.operationId, _queueId, queueItem.ftQueueItemId, "Pending", null, null));       
+                        Results.Add(signRequestMessage.operationId, new SignRequestStateMessage(signRequestMessage.operationId, _queueId, queueItem.ftQueueItemId, "Pending", null, null));
                     }
                     else
                     {
@@ -121,7 +137,7 @@ namespace fiskaltrust.Middleware.Queue
                         queueItem = new OperationalQueueItem
                         {
                             ftDoneMoment = storedQueueItem.ftDoneMoment,
-                            ftQueueId = storedQueueItem.ftQueueId,  
+                            ftQueueId = storedQueueItem.ftQueueId,
                             ftQueueItemId = storedQueueItem.ftQueueItemId,
                             cbReceiptMoment = storedQueueItem.cbReceiptMoment,
                             cbReceiptReference = storedQueueItem.cbReceiptReference,

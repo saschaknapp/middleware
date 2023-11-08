@@ -41,6 +41,7 @@ namespace fiskaltrust.Middleware.Queue.Bootstrapper
             services.AddSingleton(middlewareConfiguration);
             services.AddScoped<ICryptoHelper, CryptoHelper>();
             services.AddScoped<SignProcessor>();
+            services.AddScoped<SignProcessorV2>();
             services.AddScoped<ISignProcessor>(x => new LocalQueueSynchronizationDecorator(x.GetRequiredService<SignProcessor>(), x.GetRequiredService<ILogger<LocalQueueSynchronizationDecorator>>()));
             services.AddScoped<IJournalProcessor, JournalProcessor>();
             services.AddScoped<IPOS, Queue>();

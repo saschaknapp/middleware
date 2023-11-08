@@ -1,4 +1,5 @@
-﻿using System.Threading.Tasks;
+﻿using System.Security.Policy;
+using System.Threading.Tasks;
 using AutoFixture;
 using fiskaltrust.ifPOS.v1;
 using fiskaltrust.Middleware.Contracts.Interfaces;
@@ -39,7 +40,7 @@ namespace fiskaltrust.Middleware.Queue.AcceptanceTest
             var fixture = new Fixture();
             var echoRequest = fixture.Create<EchoRequest>();
 
-            var server = StartHost(new Queue(null, null, new Contracts.Models.MiddlewareConfiguration()));
+            var server = StartHost(new Queue(null, null, null, new Contracts.Models.MiddlewareConfiguration()));
             var client = GetClient();
 
             var echoResponse = await client.EchoAsync(echoRequest);
@@ -58,7 +59,7 @@ namespace fiskaltrust.Middleware.Queue.AcceptanceTest
             var mock = new Mock<ISignProcessor>(MockBehavior.Strict);
             mock.Setup(x => x.ProcessAsync(It.Is<ReceiptRequest>(y => Matches(y, receiptRequest)))).ReturnsAsync(receiptResponse);
 
-            var server = StartHost(new Queue(mock.Object, null, new Contracts.Models.MiddlewareConfiguration()));
+            var server = StartHost(new Queue(mock.Object, null, null, new Contracts.Models.MiddlewareConfiguration()));
             var client = GetClient();
 
             var signResponse = await client.SignAsync(receiptRequest);

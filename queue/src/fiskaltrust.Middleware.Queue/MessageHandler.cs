@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.ServiceModel.Channels;
 using System.Threading;
 using System.Threading.Tasks;
 using fiskaltrust.ifPOS.v1;
@@ -41,13 +42,13 @@ namespace fiskaltrust.Middleware.Queue
 
         public Dictionary<string, SignRequestStateMessage> Results { get; set; } = new Dictionary<string, SignRequestStateMessage>();
 
-        public MessageHandler(ILogger<MessageHandler> logger, Guid queueId, MiddlewareConfiguration configuration, SignProcessorV2 signProcessorV2, IMiddlewareQueueItemRepository queueItemRepository)
+        public MessageHandler(ILogger<MessageHandler> logger, MiddlewareConfiguration configuration, SignProcessorV2 signProcessorV2, IMiddlewareQueueItemRepository queueItemRepository)
         {
             _logger = logger;
-            _queueId = queueId;
             _signProcessorV2 = signProcessorV2;
             _queueItemRepository = queueItemRepository;
             _cashBoxId = configuration.CashBoxId;
+            _queueId = configuration.QueueId;
             _stateRequestTopic = $"{_cashBoxId}/signrequest/state";
             _signRequestTopic = $"{_cashBoxId}/signrequest";
             _signResponseTopic = $"{_cashBoxId}/signresponse/#";
@@ -128,46 +129,61 @@ namespace fiskaltrust.Middleware.Queue
                     OperationalQueueItem queueItem = null;
                     if (!Results.ContainsKey(signRequestMessage.operationId))
                     {
-                        queueItem = await _signProcessorV2.QueueQueueItemAsync(signRequestMessage.request, signRequestMessage.operationId);
-                        Results.Add(signRequestMessage.operationId, new SignRequestStateMessage(signRequestMessage.operationId, _queueId, queueItem.ftQueueItemId, "Pending", null, null));
+                        queueItem = await AddPendingQueueItemAsync(e, signRequestMessage, queueItem);
+                        await e.AcknowledgeAsync(CancellationToken.None);
+                        var receiptResponse = await ProcessQueueItemAsync(queueItem);
+                        await QueueItemDoneAsync(queueItem, receiptResponse);
                     }
                     else
                     {
-                        var storedQueueItem = await _queueItemRepository.GetAsync(Results[signRequestMessage.operationId].queueId);
-                        queueItem = new OperationalQueueItem
+                        if (Results[signRequestMessage.operationId].state == "Done")
                         {
-                            ftDoneMoment = storedQueueItem.ftDoneMoment,
-                            ftQueueId = storedQueueItem.ftQueueId,
-                            ftQueueItemId = storedQueueItem.ftQueueItemId,
-                            cbReceiptMoment = storedQueueItem.cbReceiptMoment,
-                            cbReceiptReference = storedQueueItem.cbReceiptReference,
-                            cbTerminalID = storedQueueItem.cbTerminalID,
-                            country = storedQueueItem.country,
-                            ftQueueMoment = storedQueueItem.ftQueueMoment,
-                            ftQueueRow = storedQueueItem.ftQueueRow,
-                            ftQueueTimeout = storedQueueItem.ftQueueTimeout,
-                            ftWorkMoment = storedQueueItem.ftWorkMoment,
-                            OperationId = signRequestMessage.operationId,
-                            request = storedQueueItem.request,
-                            requestHash = storedQueueItem.requestHash,
-                            response = storedQueueItem.response,
-                            responseHash = storedQueueItem.responseHash,
-                            TimeStamp = storedQueueItem.TimeStamp,
-                            version = storedQueueItem.version
-                        };
-                        // TODO we need to check if it was processed already and react accordingly
+                            var ss = new MqttApplicationMessageBuilder()
+                                .WithTopic(e.ApplicationMessage.ResponseTopic)
+                                .WithPayload(JsonConvert.SerializeObject(Results[signRequestMessage.operationId]))
+                                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                                .Build();
+                            await _mqttClient.EnqueueAsync(ss);
+                            await e.AcknowledgeAsync(CancellationToken.None);
+                        }
+                        else
+                        {
+                            var storedQueueItem = await _queueItemRepository.GetAsync(Results[signRequestMessage.operationId].queueId);
+                            queueItem = new OperationalQueueItem
+                            {
+                                ftDoneMoment = storedQueueItem.ftDoneMoment,
+                                ftQueueId = storedQueueItem.ftQueueId,
+                                ftQueueItemId = storedQueueItem.ftQueueItemId,
+                                cbReceiptMoment = storedQueueItem.cbReceiptMoment,
+                                cbReceiptReference = storedQueueItem.cbReceiptReference,
+                                cbTerminalID = storedQueueItem.cbTerminalID,
+                                country = storedQueueItem.country,
+                                ftQueueMoment = storedQueueItem.ftQueueMoment,
+                                ftQueueRow = storedQueueItem.ftQueueRow,
+                                ftQueueTimeout = storedQueueItem.ftQueueTimeout,
+                                ftWorkMoment = storedQueueItem.ftWorkMoment,
+                                OperationId = signRequestMessage.operationId,
+                                request = storedQueueItem.request,
+                                requestHash = storedQueueItem.requestHash,
+                                response = storedQueueItem.response,
+                                responseHash = storedQueueItem.responseHash,
+                                TimeStamp = storedQueueItem.TimeStamp,
+                                version = storedQueueItem.version
+                            };
+                            if (!queueItem.ftWorkMoment.HasValue)
+                            {
+                                var receiptResponse = await ProcessQueueItemAsync(queueItem);
+                                await QueueItemDoneAsync(queueItem, receiptResponse);
+                            }
+                            var ss = new MqttApplicationMessageBuilder()
+                               .WithTopic(e.ApplicationMessage.ResponseTopic)
+                               .WithPayload(JsonConvert.SerializeObject(Results[signRequestMessage.operationId]))
+                               .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                               .Build();
+                            await _mqttClient.EnqueueAsync(ss);
+                            await e.AcknowledgeAsync(CancellationToken.None);
+                        }
                     }
-
-                    await _mqttClient.EnqueueAsync(e.ApplicationMessage.ResponseTopic, JsonConvert.SerializeObject(new SignRequestAcceptedMessage(queueItem.OperationId, queueItem.ftQueueId, queueItem.ftQueueItemId)), MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce);
-                    _logger.LogDebug("Published new message to {topic}", e.ApplicationMessage.ResponseTopic);
-                    await e.AcknowledgeAsync(CancellationToken.None);
-
-                    Results[queueItem.OperationId] = new SignRequestStateMessage(queueItem.OperationId, queueItem.ftQueueId, queueItem.ftQueueItemId, "Processing", null, null);
-                    var receiptResponse = await _signProcessorV2.ProcessQueueItemAsync(queueItem);
-                    Results[queueItem.OperationId] = new SignRequestStateMessage(queueItem.OperationId, queueItem.ftQueueId, queueItem.ftQueueItemId, "Done", null, JsonConvert.SerializeObject(receiptResponse));
-                    var topic = $"{_cashBoxId}/signrequest/{queueItem.OperationId}/done";
-                    await _mqttClient.EnqueueAsync(topic, JsonConvert.SerializeObject(new SignRequestDoneMessage(receiptResponse)), MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce);
-                    _logger.LogDebug("Published new message to {topic}", topic);
                 }
             }
             catch (Exception ex)
@@ -175,6 +191,30 @@ namespace fiskaltrust.Middleware.Queue
                 _logger.LogError(ex, "Failed to process message for topic  {topic}", e.ApplicationMessage.Topic);
                 throw;
             }
+        }
+
+        private async Task QueueItemDoneAsync(OperationalQueueItem queueItem, ReceiptResponse receiptResponse)
+        {
+            Results[queueItem.OperationId] = new SignRequestStateMessage(queueItem.OperationId, queueItem.ftQueueId, queueItem.ftQueueItemId, "Done", null, JsonConvert.SerializeObject(receiptResponse));
+            var topic = $"{_cashBoxId}/signrequest/{queueItem.OperationId}/done";
+            await _mqttClient.EnqueueAsync(topic, JsonConvert.SerializeObject(new SignRequestDoneMessage(receiptResponse)), MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce);
+            _logger.LogDebug("Published new message to {topic}", topic);
+        }
+
+        private async Task<ReceiptResponse> ProcessQueueItemAsync(OperationalQueueItem queueItem)
+        {
+            Results[queueItem.OperationId] = new SignRequestStateMessage(queueItem.OperationId, queueItem.ftQueueId, queueItem.ftQueueItemId, "Processing", null, null);
+            var receiptResponse = await _signProcessorV2.ProcessQueueItemAsync(queueItem);
+            return receiptResponse;
+        }
+
+        private async Task<OperationalQueueItem> AddPendingQueueItemAsync(MqttApplicationMessageReceivedEventArgs e, SignRequestMessage signRequestMessage, OperationalQueueItem queueItem)
+        {
+            queueItem = await _signProcessorV2.QueueQueueItemAsync(signRequestMessage.request, signRequestMessage.operationId);
+            Results.Add(signRequestMessage.operationId, new SignRequestStateMessage(signRequestMessage.operationId, _queueId, queueItem.ftQueueItemId, "Pending", null, null));
+            await _mqttClient.EnqueueAsync(e.ApplicationMessage.ResponseTopic, JsonConvert.SerializeObject(new SignRequestAcceptedMessage(queueItem.OperationId, queueItem.ftQueueId, queueItem.ftQueueItemId)), MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce);
+            _logger.LogDebug("Published new message to {topic}", e.ApplicationMessage.ResponseTopic);
+            return queueItem;
         }
     }
 }

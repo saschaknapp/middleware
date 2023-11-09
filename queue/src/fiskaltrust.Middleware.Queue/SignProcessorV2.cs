@@ -112,6 +112,7 @@ namespace fiskaltrust.Middleware.Queue
             try
             {
                 queueItem.ftWorkMoment = DateTime.UtcNow;
+                // TODO updte queueitem do now that it is in procesing state
                 _logger.LogTrace("SignProcessor.InternalSign: Calling country specific SignProcessor.");
                 (var receiptResponse, var countrySpecificActionJournals) = await _countrySpecificSignProcessor.ProcessAsync(data, queue, queueItem).ConfigureAwait(false);
                 _logger.LogTrace("SignProcessor.InternalSign: Country specific SignProcessor finished.");
